@@ -57,6 +57,7 @@ class Scheduler:
         self.running.extendleft(reversed(scheduled_seqs))
         return scheduled_seqs, False
 
+    # 当前序列无法调度时的抢占机制，此为可优化点之一（可以改为更智能的抢占策略，如优先抢占更长的序列）
     def preempt(self, seq: Sequence):
         seq.status = SequenceStatus.WAITING
         self.block_manager.deallocate(seq)
