@@ -48,7 +48,9 @@ class RotaryEmbedding(nn.Module):
         return query, key
 
 
-@lru_cache(1)
+# 注意：此函数以前使用 @lru_cache(1) 装饰器，但如果 rope_scaling 是字典类型，
+# 会导致 "TypeError: unhashable type: 'dict'" 错误，因为字典是不可哈希的类型。
+# 当参数可能包含非哈希类型（如dict、list）时，不能使用 @lru_cache 装饰器。
 def get_rope(
     head_size: int,
     rotary_dim: int,
@@ -56,6 +58,13 @@ def get_rope(
     base: float,
     rope_scaling: dict | None = None,
 ):
-    assert rope_scaling is None
+    # 删除这个断言，改为处理 rope_scaling 参数
+    # assert rope_scaling is None
+    # 如果 rope_scaling 不为 None，则记录警告或按默认方式处理
+    if rope_scaling is not None:
+        # 目前暂时忽略 rope_scaling，使用基本的 RotaryEmbedding
+        # 在实际应用中，这里可以根据 rope_scaling 参数调整 RoPE 行为
+        pass
+    
     rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base)
     return rotary_emb

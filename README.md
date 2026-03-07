@@ -19,7 +19,7 @@ A lightweight vLLM implementation built from scratch.
 ## Installation
 
 ```bash
-pip install git+https://github.com/GeeeekExplorer/nano-vllm.git
+pip install git+https://github.com/ClimberLeo/nano-vllm.git
 ```
 
 ## Model Download

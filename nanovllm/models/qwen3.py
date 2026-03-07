@@ -23,7 +23,7 @@ class Qwen3Attention(nn.Module):
         rms_norm_eps: float = 1e-06,
         qkv_bias: bool = False,
         rope_theta: float = 10000,
-        rope_scaling: tuple | None = None,
+        rope_scaling: dict | None = None,  # 注意：这里原来是 tuple | None，但实际从配置传入的是字典类型，需要保持一致
     ) -> None:
         super().__init__()
         tp_size = dist.get_world_size()
