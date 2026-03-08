@@ -56,12 +56,16 @@ class LLMEngine:
     def is_finished(self):
         return self.scheduler.is_finished()
 
+    """
+    原 nano-vllm 中此函数的返回类型错误的写成了 list[str],
+    此处将其修正为正确的 list[dict]
+    """
     def generate(
         self,
         prompts: list[str] | list[list[int]],
         sampling_params: SamplingParams | list[SamplingParams],
         use_tqdm: bool = True,
-    ) -> list[str]:
+    ) -> list[dict]:
         if use_tqdm:
             pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True)
         if not isinstance(sampling_params, list):

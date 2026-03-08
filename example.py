@@ -27,8 +27,6 @@ def main():
         print("\n")
         print(f"Prompt: {prompt!r}")
         # 注意：output 是一个字典，包含 'text' 和 'token_ids' 键
-        # 早期版本中曾尝试使用 output.outputs[0].text 访问文本，
-        # 但实际结构是字典，所以应该使用 output['text'] 来访问生成的文本
         print(f"Completion: {output['text']!r}")
 
 
