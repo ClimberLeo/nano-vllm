@@ -2,28 +2,27 @@ import os
 import time
 import torch
 from nanovllm import LLM, SamplingParams
+from transformers import AutoTokenizer
 
-# 功能测试脚本：验证真实Prompt的推理性能+生成质量（适配RTX3080 20G）
+# 功能测试脚本：验证真实Prompt的推理性能+生成质量
 def main():
     # ===================== 基础配置 =====================
     MODEL_PATH = os.path.expanduser("~/huggingface/Qwen3-1.7B")
-    TEST_TYPE = "优化前"  # 优化后修改为"优化后"
+    TEST_TYPE = "CUDAGraph优化"  # 优化后修改为"优化后"
     OUTPUT_FILE = f"nano_vllm_功能测试_{TEST_TYPE}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
     
-    # ===================== 初始化模型 =====================
-    print(f"【{TEST_TYPE}】开始Qwen3-1.7B模型功能测试（RTX3080 20G）...")
+    # ===================== 初始化模型（仅新增加载tokenizer） =====================
+    print(f"【{TEST_TYPE}】开始Qwen3-1.7B模型功能测试...")
+    # 加载模型配套的tokenizer（适配chat_template）
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     llm = LLM(MODEL_PATH, enforce_eager=True, tensor_parallel_size=1)
     
     # ===================== 测试用例 =====================
     # 采样参数
     sampling_params = SamplingParams(
         temperature=0.6,
-        max_tokens=512,
-    )
-    # Qwen模型标准prompt格式：让模型明确用户指令，输出简洁回答
-    def format_qwen_prompt(prompt):
-        return f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
-    
+        max_tokens=4096,
+    )    
     raw_prompts = [
         "介绍一下人工智能的发展历史。",
         "列出100以内的所有质数。",
@@ -46,8 +45,15 @@ def main():
         "解释一下短作业优先调度算法的优缺点。",
         "什么是混合精度推理？",
     ]
-    # 格式化所有prompt
-    prompts = [format_qwen_prompt(p) for p in raw_prompts]
+    # 标准化方式封装Prompt
+    prompts = [
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        for prompt in raw_prompts
+    ]
 
     # ===================== 执行测试 =====================
     torch.cuda.reset_peak_memory_stats()

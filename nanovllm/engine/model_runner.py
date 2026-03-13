@@ -96,7 +96,13 @@ class ModelRunner:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         max_num_batched_tokens, max_model_len = self.config.max_num_batched_tokens, self.config.max_model_len
-        num_seqs = min(max_num_batched_tokens // max_model_len, self.config.max_num_seqs)
+        """
+        优化：提升预热batch size，确保大batch算子提前加载
+        原代码：num_seqs = min(max_num_batched_tokens // max_model_len, self.config.max_num_seqs)
+        改动：调整分母提升预热batch size，至少预热32个序列，避免小batch预热不充分
+        """
+        num_seqs = min(max_num_batched_tokens // (max_model_len // 2), self.config.max_num_seqs)
+        num_seqs = max(num_seqs, 32)
         seqs = [Sequence([0] * max_model_len) for _ in range(num_seqs)]
         self.run(seqs, True)
         torch.cuda.empty_cache()
@@ -192,12 +198,18 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
-        if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
+        """
+        优化：解除Graph的batch size上限，适配2048大batch
+        原代码：if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
+        改动：上限从512→2048，确保大batch能命中CUDA Graph
+        """
+        if is_prefill or self.enforce_eager or input_ids.size(0) > 2048:
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
             bs = input_ids.size(0)
             context = get_context()
-            graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+            # 优先选择≥当前batch size的最小Graph，避免匹配失败
+            graph = self.graphs[next(x for x in sorted(self.graph_bs) if x >= bs)]
             graph_vars = self.graph_vars
             graph_vars["input_ids"][:bs] = input_ids
             graph_vars["positions"][:bs] = positions
@@ -221,24 +233,44 @@ class ModelRunner:
     def capture_cudagraph(self):
         config = self.config
         hf_config = config.hf_config
-        max_bs = min(self.config.max_num_seqs, 512)
+        max_bs = min(self.config.max_num_seqs, 2048)  # 最大batch size改为2048
         max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
-        input_ids = torch.zeros(max_bs, dtype=torch.int64)
-        positions = torch.zeros(max_bs, dtype=torch.int64)
-        slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
-        context_lens = torch.zeros(max_bs, dtype=torch.int32)
-        block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
-        outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+        
+        # 显式指定device="cuda"，避免不必要的设备迁移
+        input_ids = torch.zeros(max_bs, dtype=torch.int64, device="cuda")
+        positions = torch.zeros(max_bs, dtype=torch.int64, device="cuda")
+        slot_mapping = torch.zeros(max_bs, dtype=torch.int32, device="cuda")
+        context_lens = torch.zeros(max_bs, dtype=torch.int32, device="cuda")
+        block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32, device="cuda")
+        outputs = torch.zeros(max_bs, hf_config.hidden_size, device="cuda")
+        
+        """
+        优化：定制化graph_bs列表，只覆盖常用的关键batch size
+        原代码：self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+        改动：只保留测试用的关键batch size，避免冗余编译，节省显存和时间
+        """
+        self.graph_bs = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+        # 过滤掉超过max_bs的batch size，避免编译错误
+        self.graph_bs = [bs for bs in self.graph_bs if bs <= max_bs]
         self.graphs = {}
         self.graph_pool = None
-
+        """
+        优化：从大batch到小batch编译，使得小batch能够复用大batch的已分配空间
+        由于每次推理只会选择一个batch，因此这种复用完全不会导致空间的冲突
+        """
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
             set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
-            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
+            
+            # 预热后加synchronize，确保预热充分
+            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])
+            torch.cuda.synchronize()
+            
+            # 捕获CUDA Graph
             with torch.cuda.graph(graph, self.graph_pool):
-                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
+                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])
+            
+            # 复用graph pool，减少显存占用
             if self.graph_pool is None:
                 self.graph_pool = graph.pool()
             self.graphs[bs] = graph

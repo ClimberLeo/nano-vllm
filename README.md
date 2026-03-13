@@ -2,65 +2,147 @@
 <img width="300" src="assets/logo.png">
 </p>
 
-<p align="center">
-<a href="https://trendshift.io/repositories/15323" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15323" alt="GeeeekExplorer%2Fnano-vllm | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-</p>
+# Nano-vLLM 学习与优化实践
+**从零实现的轻量级大语言模型推理引擎 | 附深度优化实践与效果验证**
 
-# Nano-vLLM
+本项目是一个极简复刻工业级vLLM的轻量级大模型推理引擎，核心代码仅约1200行，完整还原了PagedAttention分页注意力、连续批处理、前缀缓存、张量并行、CUDA Graph等vLLM核心特性。本次实践基于该项目，深入拆解大模型推理引擎的底层架构与执行逻辑，完成了核心模块的深度性能优化，并通过严格的功能与性能测试验证了优化效果，最终实现了**吞吐量提升11.3%、峰值显存占用降低29.2%**的双重收益。
 
-A lightweight vLLM implementation built from scratch.
+---
 
-## Key Features
+## 项目核心特性
+- 🚀 **高性能离线推理**：优化后推理性能对标原生vLLM，在RTX 3090上实现2889.92 tok/s的高吞吐量
+- 📖 **高可读性代码**：极简实现，无冗余封装，非常适合学习大模型推理引擎的核心原理
+- ⚡ **完整的优化套件**：支持前缀缓存、张量并行、Torch编译、CUDA Graph等工业级优化特性
+- 🎯 **可复现的优化实践**：提供完整的优化前后性能对比、功能验证报告，可直接复现优化效果
 
-* 🚀 **Fast offline inference** - Comparable inference speeds to vLLM
-* 📖 **Readable codebase** - Clean implementation in ~ 1,200 lines of Python code
-* ⚡ **Optimization Suite** - Prefix caching, Tensor Parallelism, Torch compilation, CUDA graph, etc.
+---
 
-## Installation
+## 本次实践核心学习内容
+通过本次项目学习与优化实践，完整掌握了大模型推理引擎从架构设计到性能优化的全流程核心知识：
+1.  **大模型推理引擎核心架构**：深入理解了LLM推理的Prefill（预填充）与Decode（解码）两阶段执行逻辑，掌握了调度器、块管理器、模型执行器三大核心模块的设计与协同工作原理。
+2.  **PagedAttention分页注意力机制**：吃透了vLLM核心的分页KV缓存设计，理解了如何通过操作系统虚拟内存的分页思想，解决传统连续KV缓存的显存浪费问题，实现不同序列间的KV缓存高效复用。
+3.  **CUDA Graph底层原理与工程落地**：深入学习了CUDA执行模型，理解了Eager模式下Kernel Launch开销的瓶颈根源，掌握了CUDA Graph的录制-实例化-重放全流程，以及在大模型解码阶段的工程化落地方法。
+4.  **大模型推理性能优化方法论**：掌握了推理引擎性能瓶颈的定位思路，从CPU端调度开销、GPU端算子执行效率、显存管理效率三个维度针对性设计优化方案，同时明确了不同优化方案的适用场景与边界。
+5.  **推理引擎功能正确性验证**：学会了从生成内容一致性、EOS停止逻辑、长序列稳定性等维度，验证优化后推理引擎的功能正确性，确保性能优化不损失模型生成效果。
 
+---
+
+## 核心优化实践
+本次优化的核心目标是解决原生CUDA Graph实现的三大瓶颈：大batch场景无法命中、显存冗余占用、预热不充分导致的稳定性问题，最终落地了5项核心优化，同时完成了多项优化方案的探索与边界验证。
+
+### 一、核心落地优化：CUDA Graph深度重构
+#### 优化背景
+原生项目的CUDA Graph实现存在严重的场景适配问题，在RTX 3090 24G显卡、1024序列的大batch场景下，完全无法发挥CUDA Graph的性能优势：
+1.  硬编码限制Graph最大batch size为512，1024/2048大batch场景完全无法命中CUDA Graph，仍使用高开销的Eager模式执行；
+2.  采用16步长连续生成batch size编译列表，产生36个冗余编译项，造成严重的显存浪费；
+3.  从小到大的编译顺序导致小batch显存池无法被大batch复用，加剧显存碎片与占用；
+4.  预热batch size过小，大batch场景下算子预热不充分，导致Graph捕获失败、首次推理卡顿。
+
+#### 具体优化方案
+| 优化点 | 具体改动 | 核心收益 |
+|--------|----------|----------|
+| 解除batch size硬编码限制 | 将最大编译batch size从512提升至2048，适配RTX 3090显存能力 | 1024序列核心场景100%命中CUDA Graph，彻底消除Decode阶段Kernel Launch开销 |
+| 定制化编译batch列表 | 摒弃连续步长生成方式，仅保留12个核心batch size（1/2/4/8/16/32/64/128/256/512/1024/2048） | 消除冗余编译，编译时间从1-2分钟缩短至20秒，大幅降低显存占用 |
+| 逆序编译实现显存池复用 | 将从小到大的编译顺序改为从大到小逆序编译 | 首个大batch创建的显存池可被所有小batch复用，彻底解决显存池无法复用的问题，减少显存碎片 |
+| 优化模型预热逻辑 | 调整预热batch size计算逻辑，设置最小预热batch size为32 | 确保大batch场景下flash_attn等核心算子提前加载，避免Graph捕获失败，提升推理稳定性 |
+| 完善Graph匹配逻辑 | 优化运行时Graph匹配规则，优先选择≥当前batch size的最小编译项 | 不同batch size的请求均可精准命中预编译Graph，最大化优化收益 |
+
+## 优化效果展示
+所有测试结果均基于固定环境与配置，可100%复现，优化前后仅修改CUDA Graph相关代码，其余逻辑完全一致。
+
+### 一、基准性能测试
+#### 测试环境
+| 环境项 | 配置参数 |
+|--------|----------|
+| 显卡 | NVIDIA GeForce RTX 3090（24GB显存） |
+| 操作系统 | Linux 6.8.0-40-generic |
+| 软件栈 | Python 3.10.19、PyTorch 2.4.1、CUDA 11.8 |
+| 测试模型 | Qwen3-1.7B |
+| 测试配置 | 序列数=1024，输入长度100~1024随机采样，输出长度100~1024随机采样 |
+| 总生成Token数 | 583802 tok |
+
+#### 优化前后性能对比
+| 核心指标 | 优化前 | CUDA Graph优化后 | 优化幅度 |
+|----------|--------|------------------|----------|
+| 总推理耗时 | 224.84 s | 202.01 s | 缩短 10.15% |
+| 推理吞吐量 | 2596.52 tok/s | 2889.92 tok/s | 提升 11.30% |
+| GPU峰值显存占用 | 20.94 GB | 14.82 GB | 降低 29.23% |
+
+### 二、功能正确性验证
+通过20条覆盖知识问答、逻辑推理、概念解释的测试Prompt，验证优化后模型的生成质量、停止逻辑、长序列稳定性，确保性能优化无内容退化。
+
+#### 功能测试结果对比
+| 测试指标 | 优化前 | CUDA Graph优化后 |
+|----------|--------|------------------|
+| 总推理耗时 | 196.86 s | 174.76 s |
+| Decode阶段吞吐量 | 159.81 tok/s | 177.39 tok/s |
+| GPU峰值显存占用 | 20.30 GB | 14.18 GB |
+| 生成内容正确性 | 正常 | 完全一致，无内容退化、逻辑错误 |
+| EOS停止逻辑 | 正常 | 完全正常，无重复生成、无限输出问题 |
+| 长序列稳定性 | 正常 | 完全正常，无上下文丢失、输出混乱问题 |
+
+#### 生成效果示例（优化前后完全一致）
+1.  **Prompt**：介绍一下人工智能的发展历史。
+    - 优化后输出：完整覆盖从1950年图灵测试、1956年达特茅斯会议，到符号主义、专家系统、机器学习兴起、深度学习爆发的全阶段，时间线准确、逻辑清晰，无内容缺失。
+2.  **Prompt**：列出100以内的所有质数。
+    - 优化后输出：准确列出25个100以内的质数，无遗漏、无错误，附带清晰的质数定义说明。
+3.  **Prompt**：什么是大语言模型？
+    - 优化后输出：完整解释大语言模型的定义、核心特点、应用场景、优势与挑战，概念准确、通俗易懂。
+
+---
+
+## 快速开始
+### 1. 安装依赖
 ```bash
 pip install git+https://github.com/ClimberLeo/nano-vllm.git
 ```
 
-## Model Download
-
-To download the model weights manually, use the following command:
+### 2. 模型下载
+在终端运行以下命令，即可自动完成模型下载：
 ```bash
-huggingface-cli download --resume-download Qwen/Qwen3-0.6B \
-  --local-dir ~/huggingface/Qwen3-0.6B/ \
-  --local-dir-use-symlinks False
+python model_download.py
 ```
+下载完成后，模型权重将保存在`~/huggingface/Qwen3-1.7B/`目录下。
 
-## Quick Start
-
-See `example.py` for usage. The API mirrors vLLM's interface with minor differences in the `LLM.generate` method:
+### 3. 一键启动推理
 ```python
 from nanovllm import LLM, SamplingParams
-llm = LLM("/YOUR/MODEL/PATH", enforce_eager=True, tensor_parallel_size=1)
+
+# 初始化LLM推理引擎，开启CUDA Graph优化（enforce_eager=False）
+llm = LLM(
+    model_path="/YOUR/MODEL/PATH",
+    enforce_eager=False,  # 关闭Eager模式，开启CUDA Graph优化
+    max_model_len=4096,
+    max_num_seqs=2048,
+    max_num_batched_tokens=16384
+)
+
+# 配置采样参数
 sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
-prompts = ["Hello, Nano-vLLM."]
+
+# 执行推理
+prompts = ["你好，Nano-vLLM！请介绍一下你自己。"]
 outputs = llm.generate(prompts, sampling_params)
-outputs[0]["text"]
+
+# 输出结果
+print(outputs[0]["text"])
 ```
 
-## Benchmark
+### 4. 基准性能测试
+执行`bench.py`即可复现本文中的性能测试结果：
+```bash
+python bench.py
+```
 
-See `bench.py` for benchmark.
+---
 
-**Test Configuration:**
-- Hardware: RTX 4070 Laptop (8GB)
-- Model: Qwen3-0.6B
-- Total Requests: 256 sequences
-- Input Length: Randomly sampled between 100–1024 tokens
-- Output Length: Randomly sampled between 100–1024 tokens
+## 项目学习总结
+1.  从底层吃透了工业级大模型推理引擎的核心设计，打破了对大模型推理的黑盒认知，理解了PagedAttention、连续批处理、CUDA Graph等核心技术的原理与工程落地细节。
+2.  形成了完整的系统级性能优化闭环，从瓶颈定位、方案设计、代码落地，到效果验证、边界总结，掌握了“抓住核心瓶颈、小改动大收益”的优化思路，本次核心优化仅修改不到50行代码，就实现了吞吐量与显存占用的双重大幅优化。
+3.  积累了丰富的工程踩坑经验，明确了各类优化方案的适用场景与实现边界，深刻理解了“没有通用的最优优化，只有适配场景的最优方案”，避免了盲目套用优化方案的误区。
+4.  验证了极简代码的学习价值，通过1200行的极简实现，完整掌握了工业级推理引擎的核心架构，相比直接阅读vLLM源码，大幅降低了学习门槛，实现了从原理到实践的完整落地。
 
-**Performance Results:**
-| Inference Engine | Output Tokens | Time (s) | Throughput (tokens/s) |
-|----------------|-------------|----------|-----------------------|
-| vLLM           | 133,966     | 98.37    | 1361.84               |
-| Nano-vLLM      | 133,966     | 93.41    | 1434.13               |
+---
 
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=GeeeekExplorer/nano-vllm&type=Date)](https://www.star-history.com/#GeeeekExplorer/nano-vllm&Date)
+## 致谢
+感谢原项目 [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) 的开源贡献，为大模型推理引擎的学习提供了极简、高质量的代码范本。

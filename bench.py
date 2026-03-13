@@ -9,11 +9,11 @@ from nanovllm import LLM, SamplingParams
 def main():
     # ===================== 基础配置 =====================
     seed(0)
-    num_seqs = 256
+    num_seqs = 1024
     max_input_len = 1024
     max_output_len = 1024
     model_path = os.path.expanduser("~/huggingface/Qwen3-1.7B/")
-    test_type = "优化前"  # 优化后改这里
+    test_type = "CUDAGraph"  # 优化后改这里
     output_file = f"nano_vllm_基准性能测试_{test_type}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
 
     # ===================== 环境信息 =====================
